@@ -1,0 +1,443 @@
+---
+title: "Análisis de tumores mamarios"
+author: "Ulises Rodas"
+format:
+  dashboard:
+    theme: cosmo
+    orientation: rows
+    scrolling: true
+server: shiny
+---
+
+```{r, warning=FALSE, message=FALSE, include=FALSE}
+#| context: setup 
+
+# Librerías
+library(shiny)
+library(tidyverse)
+library(factoextra)
+library(cluster) #P ara diana() y silhouette()
+library(DT) # Para datatable()
+library(rio)
+library(ggrepel)
+library(scatterplot3d)
+library(tictoc)
+library(NbClust) # Para el óptimo de clusters bajo ese método
+library(dbscan)
+library(bslib)
+
+# CARGA Y PREPARACIÓN DE DATOS
+cancer <- read_csv("cancer.csv")
+df <- cancer 
+subdata <- cancer
+subdata_escalada <- scale(subdata) # Estandarizamos
+distancias <- dist(subdata_escalada, method = "euclidean") # Distancias
+
+# CÁLCULOS PESADOS (se hacen aquí una vez para no lentear la app) ---
+
+# 1. Cálculo de NbClust (lo sacamos del server para que sea rápido)
+# Esto puede tardar un poco al iniciar la app, pero luego vuela.
+nb_result_precalc <- NbClust(data = subdata_escalada, 
+                     diss = distancias, 
+                     distance = NULL,
+                     min.nc = 2, 
+                     max.nc = 10, 
+                     method = "ward.D2", 
+                     index = "all")
+
+# 2. Jerárquico Aglomerativo
+res_aglomerativo <- hclust(distancias, method = "ward.D2")
+aglomerativo = hcut(x = subdata_escalada, 
+                    k = 2, 
+                    hc_func='agnes', 
+                    hc_method = "ward.D2") 
+
+# Preparación data Aglomerativo
+cancer_aglomerativo <- cancer |>
+  mutate(cluster = as.factor(aglomerativo$cluster)) |>
+  mutate(cluster = recode(cluster, "1" = "Maligno", "2" = "Benigno")) |> 
+  mutate(cluster = factor(cluster, levels = c("Maligno", "Benigno")))
+
+perfil_clusters <- cancer_aglomerativo |>
+  group_by(cluster) |>
+  summarise(
+    puntos_concavos_prom = mean(`concave points_worst`),
+    perimetro_prom = mean(perimeter_worst),
+    textura_prom = mean(texture_worst),
+    concavidad_prom = mean(concavity_worst),
+    symmetry_worst_prom = mean(symmetry_worst),
+    .groups = 'drop'
+  )
+
+# 3. Jerárquico Divisivo
+res_divisivo <- diana(subdata_escalada)
+divisivo <- hcut(x = subdata_escalada, k = 2, hc_func = "diana")
+
+# Preparación data Divisivo
+cancer_divisivo <- cancer |>
+  mutate(cluster_div = as.factor(divisivo$cluster)) |>
+  mutate(cluster_div = recode(cluster_div, "1" = "Maligno", "2" = "Benigno")) |>
+  mutate(cluster_div = factor(cluster_div, levels = c("Maligno", "Benigno")))
+
+perfil_clusters_divisivo <- cancer_divisivo |>
+  group_by(cluster_div) |>
+  summarise(
+    puntos_concavos_prom = mean(`concave points_worst`),
+    perimetro_prom = mean(perimeter_worst),
+    textura_prom = mean(texture_worst),
+    concavidad_prom = mean(concavity_worst),
+    symmetry_worst_prom = mean(symmetry_worst),
+    .groups = 'drop'
+  )
+
+```
+
+# Tabla
+
+##  {.sidebar}
+
+Este dashboard presenta una exploración de los perfiles de tumores mamarios utilizando dos técnicas de Machine Learning no supervisado: jerárquico y divisivo. El objetivo es ver cómo estas técnicas identifican los grupos (clústeres) de tumores con características morfológicas similares usando 5 variables clave: concave points_worst, perimeter_worst, texture_worst, concavity_worst y symmetry_worst.
+
+## Row
+
+**Explicación del Conjunto de Datos:**
+
+El conjunto de datos "Breast Cancer Wisconsin (Diagnostic)" es un recurso clásico en Machine Learning disponible en el repositorio de la Universidad de California en Irvine que contiene características numéricas extraídas de imágenes digitalizadas de aspirados con aguja fina de masas mamarias.
+
+**Variables Seleccionadas:**
+
+He elegido 5 variables que capturan diferentes dimensiones de la morfología del tumor, evitando redundancia:
+
+-   **concave points_worst:** Mide la irregularidad de la forma del tumor. Valores altos sugieren una forma menos suave.
+
+-   **perimeter_worst:** Representa el tamaño general del tumor.
+
+-   **texture_worst:** Indica la variación en la escala de grises de los núcleos celulares (una medida de la heterogeneidad de la textura).
+
+-   **concavity_worst:** Mide la severidad de las hendiduras en el contorno del tumor.
+
+-   **symmetry_worst:** Nos dice qué tan irregular y asimétrica es la forma de los núcleos celulares más anormales encontrados en la muestra.
+
+En el dataset original la variable que nos dice el tipo de tumor (benigno/maligno) está presente, pero aquí se ha obviado para que el mismo algoritmo de Machine Learning nos diga si es benigno o maligno.
+
+```{r}
+#| title: "Perfiles de Tumores Mamarios con Clustering Jerárquico"
+DT::datatable(df, 
+              width = "60%",
+              options = list(pageLength = 10), 
+              caption = "Base de datos con variables seleccionadas")
+```
+
+# Clusters
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: 1. Método del Codo (gráfico)
+plotOutput("grafico_codo")
+```
+
+### Column {width="35%"}
+
+El método del codo nos da 2 clusters. El código usado fue:
+
+``` {.r code="false"}
+output$grafico_codo <- renderPlot({
+  fviz_nbclust(subdata_escalada,
+               hcut, # Método de clusterización  
+               diss = distancias,
+               method = "wss", # Suma de cuadrados
+               k.max = 10, # 10 clusters
+               verbose = FALSE) +
+    labs(title = "Óptimo número de clusters") +
+    geom_vline(xintercept = 2, linetype = 2, color = "red") # Después: se sugiere 2 clústers 
+})
+```
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: 2. Resumen de texto NbClust (robusto)
+textOutput("texto_nbclust")
+```
+
+### Column {width="35%"}
+
+El código usado fue:
+
+``` {.r code="false"}
+output$texto_nbclust <- renderText({
+  paste0("Según NbClust, el número óptimo de clusters es: ", 
+         nb_result$Best.nc[1], 
+         "\n\nEste resultado se basa en la evaluación de ", 
+         length(nb_result$Best.nc) - 1, 
+         " índices estadísticos diferentes.")
+})
+```
+
+# Jerárquico aglomerativo
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: Dendograma aglomerativo
+plotOutput("dendrograma_aglomerativo")  
+```
+
+### Column {width="35%"}
+
+**Interpretación:** <br>
+
+El dendrograma muestra cómo se agrupan, de abajo hacia arriba, los 569 tumores mamarios basándose en sus características morfológicas. Hay dos grupos bien diferenciados:
+
+-   **Cluster 1: Rojo.**
+-   **Cluster 2: Turquesa.**
+
+Dada la naturaleza de nuestra base de datos, diríamos que un cluster es de tumores malignos y otro de tumores benignos, aunque faltaría la confirmación con los siguientes análisis.
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: Clusters (tabla)
+DT::dataTableOutput("tabla_perfil")
+```
+
+### Column {width="35%"}
+
+**Interpretación:** Se confirman las hipótesis. <br>
+
+-   **Clúster 1: Tumores malignos.** Tienen promedios más altos (más grandes, más irregulares).
+
+-   **Clúster 2: Tumores benignos.** Tienen promedios más bajos (más pequeños, forma más suave).
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: Análisis de componentes principales (Aglomerativo)
+plotOutput("plot_clusters_2d")
+```
+
+### Column {width="35%"}
+
+**Interpretación:** <br>
+
+-   **Clúster Rojo: Malignos.** Son más dispersos, grandes e irregulares.
+
+-   **Clúster Turquesa: Benignos.** Son más compactos y densos.
+
+-   **Intersección:** Tienen características similares. Son los casos más difíciles de clasificar tanto para el algoritmo como para los doctores en la vida real.
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: "Validación: Gráfico de silueta (Aglomerativo)"
+plotOutput("plot_silueta")
+```
+
+### Column {width="35%"}
+
+**Interpretación:** <br> El promedio de la silueta es de 0.45
+
+-   **Clúster Rojo: Malignos.** Menos definido, disperso.
+
+-   **Clúster Turquesa: Benignos.** Fuerte y bien definido.
+
+# Jerárquico divisivo
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: Dendograma divisivo
+plotOutput("dendrograma_divisivo")
+```
+
+### Column {width="35%"}
+
+**Interpretación:** <br>
+
+El método divisivo funciona de arriba hacia abajo y llega a casi la misma conclusión, logrando una validación cruzada fuerte.
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: "Clusters (tabla)"
+DT::dataTableOutput("tabla_perfil_divisivo")
+```
+
+### Column {width="35%"}
+
+**Comparación:** Se confirma lo visto en el método anterior. <br>
+
+-   **Separación limpia:** División nítida entre rojo y turquesa.
+
+-   **Clúster 1: Tumores malignos.**
+
+-   **Clúster 2: Tumores benignos.**
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: "Análisis de componentes principales (Divisivo)"
+plotOutput("plot_clusters_2d_divisivo")
+```
+
+### Column {width="35%"}
+
+**Comparación:** <br>
+
+-   **Separación limpia:** División nítida entre rojo y turquesa.
+
+-   **Maligno (rojo):** Disperso y alargado (heterogéneo).
+
+-   **Benigno (turquesa):** Denso y compacto (homogéneo).
+
+## Row
+
+### Column {width="65%"}
+
+```{r}
+#| title: "Validación: Gráfico de silueta (Divisivo)"
+plotOutput("plot_silueta_divisivo")
+```
+
+### Column {width="35%"}
+
+**Comparación:** Hay un promedio de 0.45, lo cual es muy bueno. <br>
+
+-   **Clúster 1 (Malignos):** Válido pero heterogéneo.
+
+-   **Clúster 2 (Benignos):** Cohesivo y bien separado.
+
+# Conclusiones y fuente
+
+## Row
+
+-   **1. El método divisivo es mejor:** Para este caso de 5 variables, definió mejor los grupos. Es el primer vistazo de las grandes aplicaciones predictivas del Machine learning, pudiendo otros modelos tener mayor precisión al usar más variables como el Random forest. <br>
+
+-   **2. La consistencia entre métodos valida los resultados:** La coincidencia entre ambos métodos valida la existencia natural de dos tipos de tumores. <br>
+
+-   **3. La selección de variables es crucial:** En un primer momento, en vez de la actual variable **symmetry_worst**, trabajaba con la variable **area_se**, pero trajo muchos problemas en el método divisivo porque distorcionaba demasiado el análisis pese a estar estandarizada: un solo cluster domibana el 99% de los gráficos. Al final, decidí cambiar de variable para tener clústeres relativamente similares. Como no soy del mundo de la medicina, era probable que la variable que elegí primero era redundante con otra que ya estaba presente, situación que distorcionada todo. Por dicho motivo, elegir bien tus variables para clusterizar es muy importante.
+
+## Row
+
+**Link de la base de datos original:**
+
+<https://archive.ics.uci.edu/dataset/17/breast+cancer+wisconsin+diagnostic>
+
+```{r}
+#| context: server
+#| label: server-logic
+
+# DETERMINACIÓN DEL NÚMERO ÓPTIMO DE CLUSTERS:
+# 1. Método gráfico (del Codo)
+output$grafico_codo <- renderPlot({
+  fviz_nbclust(subdata_escalada, #Usa subdata_escalada en lugar de subdata
+               hcut, #Método de clusterización elegido  
+               diss = distancias,
+               method = "wss", #Método de suma de cuadrados
+               k.max = 10, #Probó con 10 clusters
+               verbose = FALSE) +
+    labs(title = "Óptimo número de clusters") +
+    geom_vline(xintercept = 2, linetype = 2, color = "red") #Se sugiere 2 clústers
+})
+
+# 2. Método NBCLUST (Solo imprimimos el texto del cálculo hecho en setup)
+output$texto_nbclust <- renderText({
+  # Usamos nb_result_precalc que calculamos arriba
+  paste0("Según NbClust, el número óptimo de clusters es: ", 
+         nb_result_precalc$Best.nc[1], 
+         "\n\nEste resultado se basa en la evaluación de ", 
+         length(nb_result_precalc$Best.nc) - 1, 
+         " índices estadísticos diferentes.")
+})
+
+# ML NO SUPERVISADO: JERÁRQUICO AGLOMERATIVO
+# 1. Dendrograma aglomerativo:
+output$dendrograma_aglomerativo <- renderPlot({
+  fviz_dend(res_aglomerativo, k = 2, 
+            cex = 0.5,
+            color_labels_by_k = TRUE,
+            rect = TRUE,
+            main = "Dendrograma Aglomerativo")
+})
+
+# 2. Tabla de clusters
+output$tabla_perfil <- DT::renderDataTable({
+  perfil_clusters #Llamamos al objeto creado
+})
+
+# 3. Análisis de componentes principales aglomerativo
+output$plot_clusters_2d <- renderPlot({
+  cluster_etiqueta <- list( #Lista para darle al gráfico los datos y etiquetas
+    data = subdata_escalada, #Datos para hacer el mapa PCA
+    cluster = cancer_aglomerativo$cluster)  #El vector con "Maligno" y "Benigno"
+  
+  fviz_cluster(
+    object = cluster_etiqueta, #Usamos la etiqueta con los nombres
+    geom = "point",
+    ellipse.type = "convex",
+    ggtheme = theme_minimal(),
+    main = "Visualización de los clusters")
+})
+
+# 4. Validación: Silueta aglomerativa
+output$plot_silueta <- renderPlot({
+  fviz_silhouette(aglomerativo, label = FALSE) + #FALSE porque con tantos puntos el gráfico sería ilegible
+    theme_minimal() +
+    labs(title = "Análisis de Silueta de los clusters")
+})
+
+# ML NO SUPERVISADO: JERÁRQUICO DIVISIVO
+# 1. Dendrograma Divisivo:
+output$dendrograma_divisivo <- renderPlot({
+  fviz_dend(res_divisivo, k = 2,
+            cex = 0.5,
+            color_labels_by_k = TRUE,
+            rect = TRUE,
+            main = "Dendrograma Divisivo")
+})
+
+# 2. Tabla de perfiles Divisiva:
+output$tabla_perfil_divisivo <- DT::renderDataTable({
+  perfil_clusters_divisivo
+})
+
+# 3. Gráfico de componentes principales Divisivo:
+output$plot_clusters_2d_divisivo <- renderPlot({
+  cluster_etiqueta_div <- list(
+    data = subdata_escalada,
+    cluster = cancer_divisivo$cluster_div
+  )
+  fviz_cluster(
+    object = cluster_etiqueta_div,
+    geom = "point",
+    ellipse.type = "convex",
+    ggtheme = theme_minimal(),
+    main = "Visualización de Clústeres (Divisivo)")
+})
+
+# 4. Validación: Silueta Divisiva:
+output$plot_silueta_divisivo <- renderPlot({
+  fviz_silhouette(divisivo, label = FALSE) +
+    theme_minimal() +
+    labs(title = "Análisis de Silueta (Divisivo)")
+})
+```
