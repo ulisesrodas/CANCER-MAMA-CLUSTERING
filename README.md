@@ -56,7 +56,6 @@ El dashboard guía al usuario a través del flujo completo de un análisis de cl
 ```text
 ├── cancer.csv             # Archivo filtrado con las 5 variables a predecir. Ese se usará en el dashboard 
 ├── cancer_dashboard.qmd   # Código fuente del dashboard (Quarto)
-├── cancer_prediction.csv  # Archivo original obtenido de la Universidad de California
 ├── cancer_preparacion.R   # Script de R con la preparación de los datos  
 └── README.md              # Documentación del proyecto
 ```
